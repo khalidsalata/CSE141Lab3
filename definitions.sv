@@ -128,4 +128,13 @@ typedef struct packed {
         logic [mask_length_gp-1:0] barrier_r_f;
 } debug_s;
 
+// a struct for the control signals 
+typedef struct packed {
+        logic is_load_op_new;
+        logic op_writes_rf_new;
+        logic is_store_op_new;
+        logic is_mem_op_new;
+        logic is_byte_op_new;
+}ctrl_sigs;
+
 `endif

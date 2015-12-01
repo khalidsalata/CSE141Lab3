@@ -27,7 +27,7 @@ instruction_s instruction, imem_out, instruction_r, instruction_Q, instruction_Q
 
 // Result of ALU, Register file outputs, Data memory output data
 logic [31:0] alu_result, alu_result_Q, rs_val_or_zero, rd_val_or_zero, 
-				 rs_val_or_zero_p, rs_val_or_zero_Q, rs_val, rd_val;
+				 rs_val_or_zero_p, rs_val_or_zero_Q, rd_val_or_zero_Q, rs_val, rd_val;
 
 // Reg. File address
 logic [($bits(instruction.rs_imm))-1:0] rd_addr;
@@ -157,6 +157,12 @@ assign rd_val_or_zero = rd_addr            ? rd_val : 32'b0;
 assign rs_val_or_zero_p = byp_rs? alu_result : rs_val_or_zero;
 assign rd_val_or_zero_p = byp_rd? alu_result : rd_val_or_zero;
 
+// Bypass
+assign byp_rs = op_writes_rf_cQ2 && (instruction_Q.rs_imm == instruction_Q2.rd) && (instruction_Q2.rd != 0);
+assign byp_rd = op_writes_rf_cQ2 && (instruction_Q.rd == instruction_Q2.rd) && (instruction_Q2.rd != 0); 
+
+assign stall_DX = 0; 
+assign stall_XM = 0; 
 
 always @(posedge clk, negedge reset)
   if(!reset) begin
@@ -221,14 +227,14 @@ always_comb
     if (net_reg_write_cmd)
       rf_wd = net_packet_i.net_data;
 
-    else if (instruction==?`kJALR)
+    else if (instruction==?`kJALR)  // TODO: delay instruction for ==? test
       rf_wd = pc_plus1;
 
-    else if (is_load_op_c)
-      rf_wd = from_mem_i.read_data;
+    else if (is_load_op_cQ)
+      rf_wd = from_mem_i.read_data;  // TODO: delay is_load_op_c likewise
 
     else
-      rf_wd = alu_result;
+      rf_wd = alu_result_Q;
   end
 
 // Determine next PC
@@ -316,7 +322,6 @@ always_comb
 
 // Decode module
 cl_decode decode (.instruction_i(instruction)
-
                   ,.is_load_op_o(is_load_op_c)
                   ,.op_writes_rf_o(op_writes_rf_c)
                   ,.is_store_op_o(is_store_op_c)
@@ -418,7 +423,7 @@ always_comb
 assign barrier_n = net_PC_write_cmd_IDLE
                    ? net_packet_i.net_data[0+:mask_length_gp]
                    : ((instruction==?`kBAR) & ~stall)
-                     ? alu_result [0+:mask_length_gp]
+                     ? alu_result_Q [0+:mask_length_gp]
                      : barrier_r;
 
 // exception_n signal, which indicates an exception
