@@ -26,11 +26,11 @@ logic [imem_addr_width_p-1:0] PC_r, PC_n,
 instruction_s instruction, imem_out, instruction_r, instruction_Q, instruction_Q2;
 
 // Result of ALU, Register file outputs, Data memory output data
-logic [31:0] alu_result, alu_result_Q, rs_val_or_zero, rd_val_or_zero, 
+logic [31:0] alu_result, alu_result_Q, rs_val_or_zero, rd_val_or_zero, rd_val_or_zero_p, 
 				 rs_val_or_zero_p, rs_val_or_zero_Q, rd_val_or_zero_Q, rs_val, rd_val;
 
 // Reg. File address
-logic [($bits(instruction.rs_imm))-1:0] rd_addr;
+logic [($bits(instruction.rs_imm))-1:0] rd_addr, rd_addr_Q, rd_addr_Q2;
 
 // Data for Reg. File signals
 logic [31:0] rf_wd;
@@ -113,7 +113,7 @@ instr_mem #(.addr_width_p(imem_addr_width_p)) imem
 assign instruction = (PC_wen_r) ? imem_out : instruction_r;
 
 // Register file
-
+/*
 reg_file #(.addr_width_p($bits(instruction.rs_imm))) rf
           (.clk(clk)
           ,.rs_addr_i(instruction.rs_imm)
@@ -123,18 +123,18 @@ reg_file #(.addr_width_p($bits(instruction.rs_imm))) rf
           ,.rs_val_o(rs_val)
           ,.rd_val_o(rd_val)
           );
-/*
-register_file rf (   
-	         .clk(clk)
+*/
+register_file # (.N(64), .W(32)) rf  
+	        ( .clk(clk)
 	        ,.wen_i(rf_wen)
-	        ,.wa_i(rd_addr)
+	        ,.wa_i(rd_addr_Q2)
            ,.wd_i(rf_wd)
 			  ,.ra0_i(instruction.rs_imm)
 			  ,.ra1_i(rd_addr)
            ,.rd0_o(rs_val)
 			  ,.rd1_o(rd_val)
              );
-*/
+
 //assign rs_val_or_zero = instruction.rs_imm ? rs_val : 32'b0;
 //assign rd_val_or_zero = rd_addr            ? rd_val : 32'b0;
 
@@ -157,21 +157,32 @@ assign rd_val_or_zero = rd_addr            ? rd_val : 32'b0;
 assign rs_val_or_zero_p = byp_rs? alu_result : rs_val_or_zero;
 assign rd_val_or_zero_p = byp_rd? alu_result : rd_val_or_zero;
 
-// Bypass
-assign byp_rs = op_writes_rf_cQ2 && (instruction_Q.rs_imm == instruction_Q2.rd) && (instruction_Q2.rd != 0);
-assign byp_rd = op_writes_rf_cQ2 && (instruction_Q.rd == instruction_Q2.rd) && (instruction_Q2.rd != 0); 
+assign byp_rs = 0; 
+assign byp_rd = 0; 
 
+// Bypass
+//assign byp_rs = op_writes_rf_cQ2 && (instruction_Q.rs_imm == instruction_Q2.rd) && (instruction_Q2.rd != 0);
+//assign byp_rd = op_writes_rf_cQ2 && (instruction_Q.rd == instruction_Q2.rd) && (instruction_Q2.rd != 0); 
+
+//Flush instructions when branching/jumping 
+// Flag for determining whether we branch - jump_now (overwritten?
+
+//assign stall_DX = stall; 
 assign stall_DX = 0; 
-assign stall_XM = 0; 
+//assign stall_XM = stall;
+// infinite nonce 
+assign stall_XM = 0; // word-align
 
 always @(posedge clk, negedge reset)
   if(!reset) begin
 	rs_val_or_zero_Q <= 0; 
-	rd_val_or_zero_Q <= 0; 
+	rd_val_or_zero_Q <= 0;
+	rd_addr_Q <= 0;
   end
   else if(!stall_DX) begin
     rs_val_or_zero_Q <= rs_val_or_zero_p; 
 	rd_val_or_zero_Q <= rd_val_or_zero_p; 
+	rd_addr_Q <= rd_addr;
   end
 
 
@@ -179,7 +190,7 @@ always @(posedge clk, negedge reset)
 ///*** DX pipeline register, part 2 ***///
 always @(posedge clk, negedge reset)
   if(!reset)
-    instruction_Q <= 0;
+    instruction_Q <= 0; 
   else if(!stall_DX) 
     instruction_Q <= instruction;
 	 
@@ -203,14 +214,15 @@ alu alu_1 (.rd_i(rd_val_or_zero)
 ///*** insert XM pipeline register***/
 // must cut a cross alu_result, instruction to ALU, is_lop_op_c
 // may not want to cut across jump_now ... 
-assign alu_result_n = alu_result; 
 
 always @(posedge clk, negedge reset)
 	if (!reset) begin
 		alu_result_Q <= 0;
+		rd_addr_Q2 <= 0;
 	end
 	else if (!stall_XM) begin
-		alu_result_Q <= alu_result_n; // input into data memory
+		alu_result_Q <= alu_result; // input into data memory
+		rd_addr_Q2 <= rd_addr_Q;
 	end
 
 always @(posedge clk, negedge reset)
@@ -227,10 +239,10 @@ always_comb
     if (net_reg_write_cmd)
       rf_wd = net_packet_i.net_data;
 
-    else if (instruction==?`kJALR)  // TODO: delay instruction for ==? test
+    else if (instruction_Q2==?`kJALR)  // TODO: delay instruction for ==? test
       rf_wd = pc_plus1;
 
-    else if (is_load_op_cQ)
+    else if (is_load_op_cQ2)
       rf_wd = from_mem_i.read_data;  // TODO: delay is_load_op_c likewise
 
     else
@@ -239,25 +251,43 @@ always_comb
 
 // Determine next PC
 assign pc_plus1     = PC_r + 1'b1;
-assign imm_jump_add = $signed(instruction.rs_imm)  + $signed(PC_r);
+assign imm_jump_add = $signed(instruction.rs_imm)  + $signed(PC_r); 
+
+logic [1:0] counter; 
+logic [1:0] counter_r; 
+logic [1:0] counter_n; 
+
+assign counter = counter_r + 1'b1; 
+
+always @ (posedge clk)
+	counter_r <= counter_n;
 
 // Next pc is based on network or the instruction
 always_comb
   begin
-    PC_n = pc_plus1;
-    if (net_PC_write_cmd_IDLE)
-      PC_n = net_packet_i.net_addr;
-    else
-      unique casez (instruction)
-        `kJALR:
-          PC_n = alu_result[0+:imem_addr_width_p];
+	 if(((instruction==?`kJALR) || (instruction==?`kBEQZ) || (instruction==?`kBNEQZ) || (instruction==?`kBGTZ) || (instruction==?`kBLTZ)) && (counter < 2'b11))
+		 begin 
+			PC_n = PC_n; 
+			counter_n = counter; 
+		 end
+	 else 
+	 begin
+			PC_n = pc_plus1; 
+			counter_n = 2'b00; 
+		 if (net_PC_write_cmd_IDLE)
+			PC_n = net_packet_i.net_addr;
+		 else
+			unique casez (instruction)
+			  `kJALR:
+				 PC_n = alu_result[0+:imem_addr_width_p];
 
-        `kBNEQZ,`kBEQZ,`kBLTZ,`kBGTZ:
-          if (jump_now)
-            PC_n = imm_jump_add;
+			  `kBNEQZ,`kBEQZ,`kBLTZ,`kBGTZ:
+				 if (jump_now)
+					PC_n = imm_jump_add;
 
-        default: begin end
-      endcase
+			  default: begin end
+			endcase
+		end
   end
 
 assign PC_wen = (net_PC_write_cmd_IDLE || ~stall);
@@ -298,7 +328,7 @@ assign stall_non_mem = (net_reg_write_cmd && op_writes_rf_c)
 // Stall if LD/ST still active; or in non-RUN state
 assign stall = stall_non_mem || (mem_stage_n != 0) || (state_r != RUN);
 
-// Launch LD/ST
+// Launch LD/STrd
 assign valid_to_mem_c = is_mem_op_c & (mem_stage_r < 2'b10);
 
 always_comb
@@ -311,6 +341,7 @@ always_comb
 
     if (from_mem_i.yumi)
         mem_stage_n   = 2'b10;
+		  
 
     // If we can commit the LD/ST this cycle, the acknowledge dmem's response
     if (from_mem_i.valid & ~stall_non_mem)
@@ -404,7 +435,8 @@ assign imem_addr = (net_imem_write_cmd) ? net_packet_i.net_addr
 assign rd_addr = (net_reg_write_cmd)
                  ? (net_packet_i.net_addr [0+:($bits(instruction.rs_imm))])
                  : ({{($bits(instruction.rs_imm)-$bits(instruction.rd)){1'b0}}
-                    ,{instruction.rd}});
+                    ,{instruction.rd}}); // Must be piped 
+						  
 
 // Instructions are shorter than 32 bits of network data
 assign net_instruction = net_packet_i.net_data [0+:($bits(instruction))];
@@ -422,7 +454,7 @@ always_comb
 // or by an an BAR instruction that is committing
 assign barrier_n = net_PC_write_cmd_IDLE
                    ? net_packet_i.net_data[0+:mask_length_gp]
-                   : ((instruction==?`kBAR) & ~stall)
+                   : ((instruction_Q2==?`kBAR) & ~stall)
                      ? alu_result_Q [0+:mask_length_gp]
                      : barrier_r;
 
